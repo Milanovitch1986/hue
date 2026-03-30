@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+
+<html lang="nl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Hue Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#111827;color:#fff;font-family:system-ui,sans-serif;min-height:100vh}
+  input[type=range]{-webkit-appearance:none;height:6px;border-radius:3px;background:#374151;outline:none}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:#facc15;cursor:pointer}
+  input,select{color:#fff}
+  input[type=time]::-webkit-calendar-picker-indicator{filter:invert(1)}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-thumb{background:#374151;border-radius:2px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+
+const BRIDGE_IP = “192.168.1.132”;
+const HUE_TOKEN = “UEwoLpbj3VHs6gX9Z5w9P1ZvWr-RCLbdCfWFyB8b”;
+const STORAGE_KEY = “hue_config”;
+
+const hueApi = async (bridge, token, path, method = “GET”, body) => {
+const url = `http://${bridge}/api/${token}${path}`;
+const opts = { method, headers: { “Content-Type”: “application/json” } };
+if (body) opts.body = JSON.stringify(body);
+const r = await fetch(url, opts);
+if (!r.ok) throw new Error(`HTTP ${r.status}`);
+return r.json();
+};
+
+const Badge = ({ on }) => (
+<span style={{display:“inline-block”,width:8,height:8,borderRadius:“50%”,marginRight:6,background:on?”#4ade80”:”#6b7280”}} />
+);
+
+const Card = ({ children, style }) => (
+
+  <div style={{background:"#1f2937",borderRadius:16,padding:16,...style}}>{children}</div>
+);
+
+// ── Setup ────────────────────────────────────────────────────────────────────
+const Setup = ({ onSave }) => {
+const [ip, setIp] = useState(””);
+const [token, setToken] = useState(””);
+const [loading, setLoading] = useState(false);
+const [err, setErr] = useState(””);
+
+const tryRegister = async () => {
+setLoading(true); setErr(””);
+try {
+const r = await fetch(`http://${ip}/api`, {
+method:“POST”, body: JSON.stringify({devicetype:“hue_dashboard#browser”})
+});
+const data = await r.json();
+if (data[0]?.success?.username) { onSave(ip, data[0].success.username); }
+else if (data[0]?.error?.type === 101) { setErr(“Druk eerst op de knop op de bridge en probeer opnieuw.”); }
+else { setErr(“Fout: “ + JSON.stringify(data)); }
+} catch(e) { setErr(“Kan bridge niet bereiken: “ + e.message); }
+setLoading(false);
+};
+
+const s = { width:“100%”, background:”#374151”, border:“none”, borderRadius:10, padding:“10px 14px”, color:”#fff”, fontSize:15, marginBottom:12, outline:“none” };
+
+return (
+<div style={{minHeight:“100vh”,display:“flex”,alignItems:“center”,justifyContent:“center”,padding:16}}>
+<div style={{width:“100%”,maxWidth:420}}>
+<h1 style={{fontSize:24,fontWeight:700,textAlign:“center”,marginBottom:20}}>🌉 Hue Bridge verbinden</h1>
+<Card>
+<p style={{fontSize:13,color:”#9ca3af”,marginBottom:12}}>
+Voer het IP-adres van je bridge in. Druk daarna op de <strong>ronde knop</strong> op de bridge en klik op Verbinden.
+</p>
+<input style={s} placeholder=“192.168.1.xxx” value={ip} onChange={e=>setIp(e.target.value)} />
+<button onClick={tryRegister} disabled={!ip||loading}
+style={{width:“100%”,background:(!ip||loading)?”#6b7280”:”#eab308”,border:“none”,borderRadius:10,padding:“10px 0”,fontWeight:700,fontSize:15,cursor:“pointer”,color:”#000”,marginBottom:12}}>
+{loading ? “Verbinden…” : “🔌 Verbinden (automatisch token)”}
+</button>
+<details style={{fontSize:13,color:”#9ca3af”}}>
+<summary style={{cursor:“pointer”,marginBottom:8}}>Al een API token?</summary>
+<input style={s} placeholder=“API token” value={token} onChange={e=>setToken(e.target.value)} />
+<button onClick={()=>{ if(ip&&token) onSave(ip,token); }} disabled={!ip||!token}
+style={{width:“100%”,background:(!ip||!token)?”#6b7280”:”#2563eb”,border:“none”,borderRadius:10,padding:“8px 0”,fontWeight:600,color:”#fff”,cursor:“pointer”,fontSize:14}}>
+Gebruik token
+</button>
+</details>
+{err && <p style={{color:”#f87171”,fontSize:13,marginTop:10}}>{err}</p>}
+</Card>
+</div>
+</div>
+);
+};
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+const App = () => {
+const [cfg, setCfg] = useState(() => {
+try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || null; } catch { return null; }
+});
+const [tab, setTab] = useState(“groepen”);
+const [groups, setGroups] = useState({});
+const [scenes, setScenes] = useState({});
+const [schedules, setSchedules] = useState({});
+const [loading, setLoading] = useState(false);
+const [toast, setToast] = useState(null);
+const [sceneModal, setSceneModal] = useState(null);
+const [scheduleModal, setScheduleModal] = useState(false);
+const [newSched, setNewSched] = useState({name:””,time:“08:00”,action:“on”,groupId:””,repeat:“everyday”});
+
+const showToast = (msg, ok=true) => { setToast({msg,ok}); setTimeout(()=>setToast(null),2500); };
+const api = useCallback((path,method,body) => hueApi(cfg.bridge,cfg.token,path,method,body), [cfg]);
+
+const load = useCallback(async () => {
+if(!cfg) return;
+setLoading(true);
+try {
+const [g,s,sc] = await Promise.all([api(”/groups”), api(”/scenes”), api(”/schedules”)]);
+setGroups(g); setScenes(s); setSchedules(sc);
+} catch(e) { showToast(“Fout: “+e.message, false); }
+setLoading(false);
+}, [api, cfg]);
+
+useEffect(()=>{ load(); },[load]);
+
+const saveConfig = (bridge, token) => {
+const c = {bridge,token};
+localStorage.setItem(STORAGE_KEY, JSON.stringify(c));
+setCfg(c);
+};
+
+if(!cfg) return <Setup onSave={saveConfig} />;
+
+const toggleGroup = async (id, on) => {
+await api(`/groups/${id}/action`,“PUT”,{on});
+setGroups(g=>({…g,[id]:{…g[id],action:{…g[id].action,on}}}));
+};
+
+const dimGroup = async (id, bri) => {
+await api(`/groups/${id}/action`,“PUT”,{bri:parseInt(bri),on:true});
+setGroups(g=>({…g,[id]:{…g[id],action:{…g[id].action,bri:parseInt(bri)}}}));
+};
+
+const activateScene = async (sceneId, groupId) => {
+await api(`/groups/${groupId}/action`,“PUT”,{scene:sceneId});
+showToast(“✅ Scene geactiveerd!”); setSceneModal(null);
+};
+
+const buildHueTime = (timeStr, repeat) => {
+const [h,m] = timeStr.split(”:”).map(Number);
+const hh=String(h).padStart(2,“0”), mm=String(m).padStart(2,“0”);
+if(repeat===“everyday”) return `W1111111/T${hh}:${mm}:00`;
+if(repeat===“daily”)    return `W0111110/T${hh}:${mm}:00`;
+if(repeat===“weekend”)  return `W1000001/T${hh}:${mm}:00`;
+return `T${new Date().toISOString().slice(0,10)}T${hh}:${mm}:00`;
+};
+
+const createSchedule = async () => {
+const {name,time,action,groupId,repeat} = newSched;
+if(!name||!groupId) return showToast(“Vul naam en groep in”,false);
+try {
+await api(”/schedules”,“POST”,{
+name, time:buildHueTime(time,repeat), status:“enabled”,
+command:{ address:`/api/${cfg.token}/groups/${groupId}/action`, method:“PUT”, body:{on:action===“on”} }
+});
+showToast(“✅ Schema aangemaakt!”); setScheduleModal(false); load();
+} catch(e) { showToast(“Fout: “+e.message,false); }
+};
+
+const deleteSchedule = async (id) => { await api(`/schedules/${id}`,“DELETE”); showToast(“🗑 Verwijderd”); load(); };
+const toggleSchedule = async (id, en) => {
+await api(`/schedules/${id}`,“PUT”,{status:en?“enabled”:“disabled”});
+setSchedules(s=>({…s,[id]:{…s[id],status:en?“enabled”:“disabled”}}));
+};
+
+const groupList = Object.entries(groups).filter(([,g])=>g.type!==“Entertainment”);
+const groupScenes = (gid) => Object.entries(scenes).filter(([,s])=>s.group===gid);
+const parseTime = t => { const m=(t||””).match(/T(\d{2}:\d{2}):/); return m?m[1]:t?.slice(0,10)||””; };
+const parseRepeat = t => {
+if((t||””).startsWith(“W1111111”)) return “Elke dag”;
+if((t||””).startsWith(“W0111110”)) return “Werkdagen”;
+if((t||””).startsWith(“W1000001”)) return “Weekend”;
+return “Eénmalig”;
+};
+
+const inp = {width:“100%”,background:”#374151”,border:“none”,borderRadius:10,padding:“9px 12px”,color:”#fff”,fontSize:14,outline:“none”,marginBottom:10};
+
+return (
+<div style={{maxWidth:480,margin:“0 auto”,padding:“16px 12px 80px”}}>
+{/* Header */}
+<div style={{display:“flex”,justifyContent:“space-between”,alignItems:“center”,marginBottom:16}}>
+<h1 style={{fontSize:20,fontWeight:700}}>💡 Hue Dashboard</h1>
+<button onClick={load} style={{background:”#1f2937”,border:“none”,color:”#9ca3af”,borderRadius:20,padding:“4px 12px”,cursor:“pointer”,fontSize:12}}>
+{loading?“⟳”:“↻”} Verversen
+</button>
+</div>
+
+```
+  {/* Tabs */}
+  <div style={{display:"flex",gap:8,marginBottom:16}}>
+    {["groepen","schemas"].map(t=>(
+      <button key={t} onClick={()=>setTab(t)}
+        style={{flex:1,padding:"9px 0",borderRadius:12,border:"none",cursor:"pointer",fontWeight:600,fontSize:14,
+          background:tab===t?"#eab308":"#1f2937",color:tab===t?"#000":"#9ca3af"}}>
+        {t==="groepen"?"🏠 Groepen & Scenes":"⏰ Schema's"}
+      </button>
+    ))}
+  </div>
+
+  {/* ── GROEPEN ── */}
+  {tab==="groepen" && (
+    <div>
+      {groupList.length===0&&!loading&&<p style={{color:"#6b7280",textAlign:"center",paddingTop:40}}>Geen groepen gevonden.</p>}
+      {groupList.map(([id,g])=>{
+        const on = g.action?.on ?? g.state?.any_on;
+        const bri = g.action?.bri ?? 254;
+        return (
+          <Card key={id} style={{marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <div>
+                <Badge on={on} />
+                <span style={{fontWeight:600}}>{g.name}</span>
+                <span style={{fontSize:12,color:"#9ca3af",marginLeft:6}}>{g.lights?.length||0} lamp{g.lights?.length!==1?"en":""}</span>
+              </div>
+              {/* Toggle */}
+              <div onClick={()=>toggleGroup(id,!on)}
+                style={{width:44,height:24,borderRadius:12,background:on?"#eab308":"#4b5563",cursor:"pointer",position:"relative",transition:"background .2s"}}>
+                <div style={{position:"absolute",top:3,left:on?22:3,width:18,height:18,borderRadius:"50%",background:"#fff",transition:"left .2s"}} />
+              </div>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+              <span style={{fontSize:12,color:"#9ca3af"}}>🔆</span>
+              <input type="range" min="1" max="254" value={bri} onChange={e=>dimGroup(id,e.target.value)} style={{flex:1}} />
+              <span style={{fontSize:12,color:"#9ca3af",width:32}}>{Math.round(bri/254*100)}%</span>
+            </div>
+            <button onClick={()=>setSceneModal(id)}
+              style={{background:"#374151",border:"none",borderRadius:8,padding:"5px 12px",color:"#fff",cursor:"pointer",fontSize:13}}>
+              🎨 Scenes
+            </button>
+          </Card>
+        );
+      })}
+    </div>
+  )}
+
+  {/* ── SCHEMA'S ── */}
+  {tab==="schemas" && (
+    <div>
+      <button onClick={()=>{setNewSched({name:"",time:"08:00",action:"on",groupId:groupList[0]?.[0]||"",repeat:"everyday"});setScheduleModal(true);}}
+        style={{width:"100%",background:"#eab308",border:"none",borderRadius:12,padding:"10px 0",fontWeight:700,color:"#000",cursor:"pointer",fontSize:15,marginBottom:14}}>
+        + Nieuw schema
+      </button>
+      {Object.entries(schedules).length===0&&!loading&&<p style={{color:"#6b7280",textAlign:"center",paddingTop:30}}>Nog geen schema's.</p>}
+      {Object.entries(schedules).map(([id,s])=>(
+        <Card key={id} style={{marginBottom:10}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <p style={{fontWeight:600}}>{s.name}</p>
+              <p style={{fontSize:12,color:"#9ca3af"}}>{parseRepeat(s.time)} · {parseTime(s.time)}</p>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <div onClick={()=>toggleSchedule(id,s.status!=="enabled")}
+                style={{width:38,height:20,borderRadius:10,background:s.status==="enabled"?"#22c55e":"#4b5563",cursor:"pointer",position:"relative"}}>
+                <div style={{position:"absolute",top:2,left:s.status==="enabled"?18:2,width:16,height:16,borderRadius:"50%",background:"#fff",transition:"left .2s"}} />
+              </div>
+              <button onClick={()=>deleteSchedule(id)} style={{background:"none",border:"none",color:"#f87171",cursor:"pointer",fontSize:18}}>🗑</button>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  )}
+
+  {/* ── SCENE MODAL ── */}
+  {sceneModal && (
+    <div onClick={()=>setSceneModal(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:50}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:"#1f2937",width:"100%",maxWidth:480,borderRadius:"20px 20px 0 0",padding:20,maxHeight:"65vh",overflowY:"auto"}}>
+        <h2 style={{fontWeight:700,fontSize:17,marginBottom:14}}>🎨 Scenes – {groups[sceneModal]?.name}</h2>
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+          {groupScenes(sceneModal).map(([sid,sc])=>(
+            <button key={sid} onClick={()=>activateScene(sid,sceneModal)}
+              style={{background:"#374151",border:"none",borderRadius:12,padding:14,textAlign:"left",cursor:"pointer",color:"#fff"}}>
+              <span style={{display:"block",fontWeight:600,fontSize:14}}>{sc.name}</span>
+              {sc.lights&&<span style={{fontSize:11,color:"#9ca3af"}}>{sc.lights.length} lamp{sc.lights.length!==1?"en":""}</span>}
+            </button>
+          ))}
+          {groupScenes(sceneModal).length===0&&<p style={{color:"#6b7280",fontSize:13,gridColumn:"1/-1"}}>Geen scenes gevonden.</p>}
+        </div>
+        <button onClick={()=>setSceneModal(null)}
+          style={{width:"100%",marginTop:14,background:"none",border:"none",color:"#6b7280",cursor:"pointer",fontSize:13}}>
+          Sluiten
+        </button>
+      </div>
+    </div>
+  )}
+
+  {/* ── SCHEDULE MODAL ── */}
+  {scheduleModal && (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,.7)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:50}}>
+      <div style={{background:"#1f2937",width:"100%",maxWidth:480,borderRadius:"20px 20px 0 0",padding:20}}>
+        <h2 style={{fontWeight:700,fontSize:17,marginBottom:14}}>⏰ Nieuw schema</h2>
+        <input style={inp} placeholder="Naam" value={newSched.name} onChange={e=>setNewSched(s=>({...s,name:e.target.value}))} />
+        <select style={inp} value={newSched.groupId} onChange={e=>setNewSched(s=>({...s,groupId:e.target.value}))}>
+          <option value="">-- Kies groep --</option>
+          {groupList.map(([id,g])=><option key={id} value={id}>{g.name}</option>)}
+        </select>
+        <div style={{display:"flex",gap:8}}>
+          <select style={{...inp,flex:1}} value={newSched.action} onChange={e=>setNewSched(s=>({...s,action:e.target.value}))}>
+            <option value="on">Aan zetten</option>
+            <option value="off">Uit zetten</option>
+          </select>
+          <input type="time" style={{...inp,flex:1}} value={newSched.time} onChange={e=>setNewSched(s=>({...s,time:e.target.value}))} />
+        </div>
+        <select style={inp} value={newSched.repeat} onChange={e=>setNewSched(s=>({...s,repeat:e.target.value}))}>
+          <option value="everyday">Elke dag</option>
+          <option value="daily">Werkdagen (ma–vr)</option>
+          <option value="weekend">Weekend (za–zo)</option>
+          <option value="once">Eénmalig</option>
+        </select>
+        <div style={{display:"flex",gap:8,marginTop:4}}>
+          <button onClick={()=>setScheduleModal(false)}
+            style={{flex:1,background:"#374151",border:"none",borderRadius:10,padding:"10px 0",color:"#fff",cursor:"pointer",fontSize:15}}>
+            Annuleren
+          </button>
+          <button onClick={createSchedule}
+            style={{flex:1,background:"#eab308",border:"none",borderRadius:10,padding:"10px 0",color:"#000",fontWeight:700,cursor:"pointer",fontSize:15}}>
+            Opslaan
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
+
+  {/* Toast */}
+  {toast && (
+    <div style={{position:"fixed",bottom:24,left:"50%",transform:"translateX(-50%)",
+      background:toast.ok?"#22c55e":"#ef4444",color:"#fff",borderRadius:20,padding:"8px 20px",fontSize:14,fontWeight:500,zIndex:99,whiteSpace:"nowrap"}}>
+      {toast.msg}
+    </div>
+  )}
+
+  {/* Reset */}
+  <button onClick={()=>{localStorage.removeItem(STORAGE_KEY);setCfg(null);}}
+    style={{position:"fixed",bottom:8,right:12,background:"none",border:"none",color:"#4b5563",cursor:"pointer",fontSize:11}}>
+    Bridge resetten
+  </button>
+</div>
+```
+
+);
+};
+
+ReactDOM.createRoot(document.getElementById(“root”)).render(<App />);
+</script>
+
+</body>
+</html>
